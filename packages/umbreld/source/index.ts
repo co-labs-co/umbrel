@@ -42,6 +42,20 @@ type StoreSchema = {
 			password?: string
 		}
 		externalDns?: boolean
+		/**
+		 * Container runtime configuration
+		 * Default: docker-compose (current behavior)
+		 * kubernetes: Enables K3s-based deployment (Phase 2)
+		 */
+		containerRuntime?: {
+			type: 'docker-compose' | 'kubernetes'
+			/** Kubernetes-specific: path to kubeconfig file */
+			kubeconfig?: string
+			/** Kubernetes-specific: namespace for Umbrel apps (default: "umbrel") */
+			namespace?: string
+			/** Kubernetes-specific: storage class for PVCs (default: "local-path") */
+			storageClass?: string
+		}
 	}
 	development: {
 		hostname?: string
@@ -168,6 +182,10 @@ export default class Umbreld {
 		// It avoids race conditions where umbrelOS starts making network requests before
 		// the local time is set which then fail with SSL cert errors.
 		await waitForSystemTime(this, 10)
+
+		// Initialize container runtime from configuration
+		// Must be called before any runtime operations
+		await this.apps.initializeRuntime()
 
 		// We need to forcefully clean Docker state before being able to safely continue
 		// If an existing container is listening on port 80 we'll crash, if an old version

@@ -12,28 +12,45 @@ import type {AppSettings} from './schema.js'
 import App, {readManifestInDirectory} from './app.js'
 import type {AppManifest} from './schema.js'
 import {fillSelectedDependencies} from '../utilities/dependencies.js'
-import {createRuntime, type ContainerRuntime, type ContainerRuntimeConfig} from './container-runtime/index.js'
+import {createRuntime, getDefaultRuntimeType, type ContainerRuntime, type ContainerRuntimeConfig, type RuntimeType} from './container-runtime/index.js'
 
 export default class Apps {
 	#umbreld: Umbreld
 	logger: Umbreld['logger']
 	instances: App[] = []
 	isTorBeingToggled = false
-	runtime: ContainerRuntime
+	runtime!: ContainerRuntime // Initialized in initializeRuntime()
 
 	constructor(umbreld: Umbreld) {
 		this.#umbreld = umbreld
 		const {name} = this.constructor
 		this.logger = umbreld.logger.createChildLogger(name.toLowerCase())
+	}
 
-		// Initialize container runtime
-		// In the future, this could be configurable via umbrel.yaml
-		const runtimeConfig: ContainerRuntimeConfig = {
-			type: 'docker-compose',
-			dataDirectory: umbreld.dataDirectory,
-			umbreld,
+	/**
+	 * Initialize the container runtime based on configuration.
+	 * Must be called before accessing this.runtime.
+	 * Reads settings.containerRuntime from umbrel.yaml (defaults to docker-compose).
+	 */
+	async initializeRuntime(): Promise<void> {
+		// Read runtime configuration from store (defaults to docker-compose)
+		const containerRuntimeConfig = await this.#umbreld.store.get('settings.containerRuntime')
+		const runtimeType: RuntimeType = containerRuntimeConfig?.type ?? getDefaultRuntimeType()
+
+		const config: ContainerRuntimeConfig = {
+			type: runtimeType,
+			dataDirectory: this.#umbreld.dataDirectory,
+			umbreld: this.#umbreld,
 		}
-		this.runtime = createRuntime(runtimeConfig)
+
+		// Add Kubernetes-specific config if applicable
+		if (runtimeType === 'kubernetes' && containerRuntimeConfig) {
+			config.kubeconfig = containerRuntimeConfig.kubeconfig
+			config.namespace = containerRuntimeConfig.namespace
+			config.storageClass = containerRuntimeConfig.storageClass
+		}
+
+		this.runtime = createRuntime(config)
 		this.logger.log(`Initialized container runtime: ${this.runtime.type}`)
 	}
 
