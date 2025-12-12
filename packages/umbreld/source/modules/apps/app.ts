@@ -4,18 +4,15 @@ import nodePath from 'node:path'
 import fse from 'fs-extra'
 import yaml from 'js-yaml'
 import {type Compose} from 'compose-spec-schema'
-import {$} from 'execa'
 import fetch from 'node-fetch'
-import stripAnsi from 'strip-ansi'
 import pRetry from 'p-retry'
 
 import getDirectorySize from '../utilities/get-directory-size.js'
-import {pullAll} from '../utilities/docker-pull.js'
 import FileStore from '../utilities/file-store.js'
 import {fillSelectedDependencies} from '../utilities/dependencies.js'
 import type Umbreld from '../../index.js'
 import {validateManifest, type AppSettings} from './schema.js'
-import appScript from './legacy-compat/app-script.js'
+import type {ContainerRuntime} from './container-runtime/index.js'
 
 async function readYaml(path: string) {
 	return yaml.load(await fse.readFile(path, 'utf8'))
@@ -49,6 +46,7 @@ type AppState =
 
 export default class App {
 	#umbreld: Umbreld
+	#runtime: ContainerRuntime
 	logger: Umbreld['logger']
 	id: string
 	dataDirectory: string
@@ -56,11 +54,12 @@ export default class App {
 	stateProgress = 0
 	store: FileStore<AppSettings>
 
-	constructor(umbreld: Umbreld, appId: string) {
+	constructor(umbreld: Umbreld, appId: string, runtime: ContainerRuntime) {
 		// Throw on invalid appId
 		if (!/^[a-zA-Z0-9-_]+$/.test(appId)) throw new Error(`Invalid app ID: ${appId}`)
 
 		this.#umbreld = umbreld
+		this.#runtime = runtime
 		this.id = appId
 		this.dataDirectory = `${umbreld.dataDirectory}/app-data/${this.id}`
 		const {name} = this.constructor
@@ -98,43 +97,9 @@ export default class App {
 	}
 
 	async patchComposeFile() {
-		const manifest = await this.readManifest()
-		const appRequestsGpuAccess = manifest.permissions?.includes('GPU')
-		const DRI_DEVICE_PATH = '/dev/dri'
-		const deviceHasGpu = await fse.exists(DRI_DEVICE_PATH).catch(() => false)
-
-		const compose = await this.readCompose()
-		for (const serviceName of Object.keys(compose.services!)) {
-			// Temporary patch to fix contianer names for modern docker-compose installs.
-			// The contianer name scheme used to be <project-name>_<service-name>_1 but
-			// recent versions of docker-compose use <project-name>-<service-name>-1
-			// swapping underscores for dashes. This breaks Umbrel in places where the
-			// containers are referenced via name and it also breaks referring to other
-			// containers via DNS since the hostnames are derived with the same method.
-			// We manually force all container names to the old scheme to maintain compatibility.
-			if (!compose.services![serviceName].container_name) {
-				compose.services![serviceName].container_name = `${this.id}_${serviceName}_1`
-			}
-
-			// Migrate downloads volume from old `${UMBREL_ROOT}/data/storage/downloads` path to new
-			// `${UMBREL_ROOT}/home/Downloads` path. Also handle raw data directory migration from
-			// `${UMBREL_ROOT}/data/storage` to `${UMBREL_ROOT}/home`.
-			// We need to do this here to handle any future app updates.
-			compose.services![serviceName].volumes = compose.services![serviceName].volumes?.map((volume) => {
-				return (volume as string)
-					?.replace('/data/storage/downloads', `/home/Downloads`)
-					?.replace('/data/storage', `/home`)
-			})
-
-			// Pass through host DRI device to all app containers if the app requests it
-			const shouldEnableGpuPassthrough = appRequestsGpuAccess && deviceHasGpu
-			if (shouldEnableGpuPassthrough) {
-				compose.services![serviceName].devices = compose.services![serviceName].devices || []
-				compose.services![serviceName].devices.push(DRI_DEVICE_PATH)
-			}
-		}
-
-		await this.writeCompose(compose)
+		// Delegate to runtime for config patching
+		// This handles container naming, volume migrations, GPU passthrough, etc.
+		await this.#runtime.patchAppConfig(this.id, this.dataDirectory)
 	}
 
 	async pull() {
@@ -146,7 +111,9 @@ export default class App {
 		const images = Object.values(compose.services!)
 			.map((service) => service.image)
 			.filter(Boolean) as string[]
-		await pullAll([...defaultImages, ...images], (progress) => {
+
+		// Use runtime to pull images with progress tracking
+		await this.#runtime.pullImages([...defaultImages, ...images], (progress) => {
 			this.stateProgress = Math.max(1, progress * 99)
 			this.logger.log(`Downloaded ${this.stateProgress}% of app ${this.id}`)
 		})
@@ -159,15 +126,9 @@ export default class App {
 		await this.patchComposeFile()
 		await this.pull()
 
-		await pRetry(() => appScript(this.#umbreld, 'install', this.id), {
-			onFailedAttempt: (error) => {
-				this.logger.error(
-					`Attempt ${error.attemptNumber} installing app ${this.id} failed. There are ${error.retriesLeft} retries left.`,
-					error,
-				)
-			},
-			retries: 2,
-		})
+		// Use runtime to install the app (retries are handled by runtime)
+		await this.#runtime.installApp(this.id, this.dataDirectory)
+
 		this.state = 'ready'
 		this.stateProgress = 0
 
@@ -189,17 +150,14 @@ export default class App {
 			.map((service) => service.image)
 			.filter(Boolean) as string[]
 
-		// Update the app, patching the compose file half way through
-		await appScript(this.#umbreld, 'pre-patch-update', this.id)
+		// Update the app via runtime, patching the compose file half way through
+		await this.#runtime.prePatchUpdate(this.id, this.dataDirectory)
 		await this.patchComposeFile()
 		await this.pull()
-		await appScript(this.#umbreld, 'post-patch-update', this.id)
+		await this.#runtime.postPatchUpdate(this.id, this.dataDirectory)
 
-		// Delete the old images if we can. Silently fail on error cos docker
-		// will return an error even if only one image is still needed.
-		try {
-			await $({stdio: 'inherit'})`docker rmi ${oldImages}`
-		} catch {}
+		// Delete the old images via runtime (silently fails if in use)
+		await this.#runtime.removeImages(oldImages)
 
 		this.state = 'ready'
 		this.stateProgress = 0
@@ -216,15 +174,10 @@ export default class App {
 		// We re-run the patch here to fix an edge case where 0.5.x imported apps
 		// wont run because they haven't been patched.
 		await this.patchComposeFile()
-		await pRetry(() => appScript(this.#umbreld, 'start', this.id), {
-			onFailedAttempt: (error) => {
-				this.logger.error(
-					`Attempt ${error.attemptNumber} starting app ${this.id} failed. There are ${error.retriesLeft} retries left.`,
-					error,
-				)
-			},
-			retries: 2,
-		})
+
+		// Use runtime to start the app (retries are handled by runtime)
+		await this.#runtime.startApp(this.id, this.dataDirectory)
+
 		this.state = 'ready'
 
 		// Enable auto-start on boot
@@ -235,15 +188,10 @@ export default class App {
 
 	async stop({persistState = false}: {persistState?: boolean} = {}) {
 		this.state = 'stopping'
-		await pRetry(() => appScript(this.#umbreld, 'stop', this.id), {
-			onFailedAttempt: (error) => {
-				this.logger.error(
-					`Attempt ${error.attemptNumber} stopping app ${this.id} failed. There are ${error.retriesLeft} retries left.`,
-					error,
-				)
-			},
-			retries: 2,
-		})
+
+		// Use runtime to stop the app (retries are handled by runtime)
+		await this.#runtime.stopApp(this.id, {persistState})
+
 		this.state = 'stopped'
 
 		// Disable auto-start on boot
@@ -256,8 +204,10 @@ export default class App {
 
 	async restart() {
 		this.state = 'restarting'
-		await appScript(this.#umbreld, 'stop', this.id)
-		await appScript(this.#umbreld, 'start', this.id)
+
+		// Use runtime to restart the app
+		await this.#runtime.restartApp(this.id, this.dataDirectory)
+
 		this.state = 'ready'
 
 		// Enable auto-start on boot
@@ -268,16 +218,14 @@ export default class App {
 
 	async uninstall() {
 		this.state = 'uninstalling'
-		await pRetry(() => appScript(this.#umbreld, 'stop', this.id), {
-			onFailedAttempt: (error) => {
-				this.logger.error(
-					`Attempt ${error.attemptNumber} stopping app ${this.id} failed. There are ${error.retriesLeft} retries left.`,
-					error,
-				)
-			},
-			retries: 2,
-		})
-		await appScript(this.#umbreld, 'nuke-images', this.id)
+
+		// Stop the app first (with retries via runtime)
+		await this.#runtime.stopApp(this.id)
+
+		// Remove images via runtime
+		await this.#runtime.uninstallApp(this.id)
+
+		// Remove app data directory (not handled by runtime)
 		await fse.remove(this.dataDirectory)
 
 		await this.#umbreld.store.getWriteLock(async ({get, set}) => {
@@ -300,21 +248,8 @@ export default class App {
 	}
 
 	async getPids() {
-		const compose = await this.readCompose()
-		const containers = Object.values(compose.services!).map((service) => service.container_name) as string[]
-		containers.push(`${this.id}_app_proxy_1`)
-		containers.push(`${this.id}_tor_server_1`)
 		try {
-			// If we fail to get the PIDs of one container, skip it and continue for
-			// the other containers. We'll expect to get it on some misses for the app
-			// proxy and tor server containers.
-			const cmd = containers.map((container) => `docker top ${container} -o pid 2>/dev/null || true`).join('\n')
-			const {stdout} = await $({shell: true})`${cmd}`
-			return stdout
-				.split('\n') // Split on newline
-				.map((line) => line.trim()) // Trim whitespace
-				.filter((line) => /^([1-9][0-9]*|0)$/.test(line)) // Keep only integers
-				.map((line) => parseInt(line, 10)) // And convert
+			return await this.#runtime.getAppPids(this.id)
 		} catch (error) {
 			this.logger.error(`Failed to get pids for app ${this.id}`, error)
 			return []
@@ -335,23 +270,11 @@ export default class App {
 	}
 
 	async getLogs() {
-		const inheritStdio = false
-		const result = await appScript(this.#umbreld, 'logs', this.id, inheritStdio)
-		return stripAnsi(result.stdout)
+		return this.#runtime.getAppLogs(this.id)
 	}
 
 	async getContainerIp(service: string) {
-		// Retrieve the container name from the compose file
-		// This works because we have a temporary patch to force all container names to the old Compose scheme to maintain compatibility between Compose v1 and v2
-		const compose = await this.readCompose()
-		const containerName = compose.services![service].container_name
-
-		if (!containerName) throw new Error(`No container_name found for service ${service} in app ${this.id}`)
-
-		const {stdout: containerIp} =
-			await $`docker inspect -f {{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}} ${containerName}`
-
-		return containerIp
+		return this.#runtime.getServiceIp(this.id, service)
 	}
 
 	// Returns a validated list of paths that should be ignored when backing up the app

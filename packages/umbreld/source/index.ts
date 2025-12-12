@@ -175,7 +175,7 @@ export default class Umbreld {
 		// Skip this in dev mode otherwise we get very slow reloads since this cleans
 		// up app containers on every source code change.
 		if (!this.developmentMode) {
-			await this.apps.cleanDockerState().catch((error) => this.logger.error(`Failed to clean Docker state`, error))
+			await this.apps.runtime.cleanState().catch((error: Error) => this.logger.error(`Failed to clean Docker state`, error))
 		}
 
 		// Initialise modules
