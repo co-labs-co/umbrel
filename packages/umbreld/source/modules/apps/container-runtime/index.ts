@@ -10,6 +10,7 @@
 
 import type {ContainerRuntime, ContainerRuntimeConfig, RuntimeType} from './types.js'
 import {DockerComposeRuntime} from './docker-compose/index.js'
+import {KubernetesRuntime} from './kubernetes/index.js'
 
 // Re-export all types
 export * from './types.js'
@@ -30,7 +31,7 @@ export * from './types.js'
  *   umbreld: umbreldInstance,
  * });
  *
- * // Future: Create Kubernetes runtime
+ * // Create Kubernetes runtime
  * const k8sRuntime = createRuntime({
  *   type: 'kubernetes',
  *   dataDirectory: '/data/umbrel',
@@ -46,11 +47,7 @@ export function createRuntime(config: ContainerRuntimeConfig): ContainerRuntime 
 			return new DockerComposeRuntime(config)
 
 		case 'kubernetes':
-			// Phase 2: Kubernetes runtime implementation
-			throw new Error(
-				'Kubernetes runtime is not yet implemented. ' +
-					'See https://github.com/co-labs-co/umbrel/issues/1 for progress.',
-			)
+			return new KubernetesRuntime(config)
 
 		default:
 			throw new Error(`Unknown container runtime type: ${(config as ContainerRuntimeConfig).type}`)
@@ -81,7 +78,7 @@ export function getDefaultRuntimeType(): RuntimeType {
 export function isRuntimeSupported(type: RuntimeType): boolean {
 	const supportedRuntimes: RuntimeType[] = [
 		'docker-compose',
-		// 'kubernetes', // Phase 2
+		'kubernetes',
 	]
 
 	return supportedRuntimes.includes(type)
