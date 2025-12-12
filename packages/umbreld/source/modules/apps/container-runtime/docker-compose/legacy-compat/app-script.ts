@@ -3,7 +3,7 @@ import {dirname, join} from 'node:path'
 
 import {$} from 'execa'
 
-import type Umbreld from '../../../index.js'
+import type Umbreld from '../../../../../index.js'
 
 export default async function appScript(umbreld: Umbreld, command: string, arg: string, inheritStdio: boolean = true) {
 	// Prevent breaking test output

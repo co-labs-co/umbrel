@@ -340,7 +340,7 @@ export class DockerComposeRuntime implements ContainerRuntime {
 				const match = portSpec.match(/:(\d+)/)
 				if (match) port = parseInt(match[1], 10)
 			} else if (typeof portSpec === 'object' && 'target' in portSpec) {
-				port = portSpec.target
+				port = portSpec.target ?? 80
 			}
 		}
 
