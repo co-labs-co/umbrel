@@ -8,17 +8,18 @@ import semver from 'semver'
 
 import randomToken from '../../modules/utilities/random-token.js'
 import type Umbreld from '../../index.js'
-import appEnvironment from './legacy-compat/app-environment.js'
 import type {AppSettings} from './schema.js'
 import App, {readManifestInDirectory} from './app.js'
 import type {AppManifest} from './schema.js'
 import {fillSelectedDependencies} from '../utilities/dependencies.js'
+import {createRuntime, getDefaultRuntimeType, type ContainerRuntime, type ContainerRuntimeConfig, type RuntimeType} from './container-runtime/index.js'
 
 export default class Apps {
 	#umbreld: Umbreld
 	logger: Umbreld['logger']
 	instances: App[] = []
 	isTorBeingToggled = false
+	runtime!: ContainerRuntime // Initialized in initializeRuntime()
 
 	constructor(umbreld: Umbreld) {
 		this.#umbreld = umbreld
@@ -26,30 +27,31 @@ export default class Apps {
 		this.logger = umbreld.logger.createChildLogger(name.toLowerCase())
 	}
 
-	// This is a really brutal and heavy handed way of cleaning up old Docker state.
-	// We should only do this sparingly. It's needed if an old version of Docker
-	// didn't shutdown cleanly and then we update to a new version of Docker.
-	// The next version of Docker can have issues starting containers if the old
-	// containers/networks are still hanging around. We had this issue because sometimes
-	// 0.5.4 installs didn't clean up properly on shutdown and it causes critical errors
-	// bringing up containers in 1.0.
-	async cleanDockerState() {
-		try {
-			const containerIds = (await $`docker ps -aq`).stdout.split('\n').filter(Boolean)
-			if (containerIds.length) {
-				this.logger.log('Cleaning up old containers...')
-				await $({stdio: 'inherit'})`docker stop --time 30 ${containerIds}`
-				await $({stdio: 'inherit'})`docker rm ${containerIds}`
-			}
-		} catch (error) {
-			this.logger.error(`Failed to clean containers`, error)
+	/**
+	 * Initialize the container runtime based on configuration.
+	 * Must be called before accessing this.runtime.
+	 * Reads settings.containerRuntime from umbrel.yaml (defaults to docker-compose).
+	 */
+	async initializeRuntime(): Promise<void> {
+		// Read runtime configuration from store (defaults to docker-compose)
+		const containerRuntimeConfig = await this.#umbreld.store.get('settings.containerRuntime')
+		const runtimeType: RuntimeType = containerRuntimeConfig?.type ?? getDefaultRuntimeType()
+
+		const config: ContainerRuntimeConfig = {
+			type: runtimeType,
+			dataDirectory: this.#umbreld.dataDirectory,
+			umbreld: this.#umbreld,
 		}
-		try {
-			this.logger.log('Cleaning up old networks...')
-			await $({stdio: 'inherit'})`docker network prune -f`
-		} catch (error) {
-			this.logger.error(`Failed to clean networks`, error)
+
+		// Add Kubernetes-specific config if applicable
+		if (runtimeType === 'kubernetes' && containerRuntimeConfig) {
+			config.kubeconfig = containerRuntimeConfig.kubeconfig
+			config.namespace = containerRuntimeConfig.namespace
+			config.storageClass = containerRuntimeConfig.storageClass
 		}
+
+		this.runtime = createRuntime(config)
+		this.logger.log(`Initialized container runtime: ${this.runtime.type}`)
 	}
 
 	async start() {
@@ -99,9 +101,9 @@ export default class Apps {
 			this.logger.error(`Failed to copy bins`, error)
 		}
 
-		// Create app instances
+		// Create app instances with runtime reference
 		const appIds = await this.#umbreld.store.get('apps')
-		this.instances = appIds.map((appId) => new App(this.#umbreld, appId))
+		this.instances = appIds.map((appId) => new App(this.#umbreld, appId, this.runtime))
 
 		// Don't save references to any apps that don't have a data directory on
 		// startup. This will allow apps that were excluded from backups to be
@@ -123,37 +125,32 @@ export default class Apps {
 		// get confused.
 		for (const app of this.instances) app.state = 'starting'
 
-		// Attempt to pre-load local Docker images
+		// Attempt to pre-load local Docker images via runtime
 		try {
-			// Loop over iamges in /images
-			const images = await fse.readdir(`/images`)
-			await Promise.all(
-				images.map(async (image) => {
-					try {
-						this.logger.log(`Pre-loading local Docker image ${image}`)
-						await $({stdio: 'inherit'})`docker load --input /images/${image}`
-					} catch (error) {
-						this.logger.error(`Failed to pre-load local Docker image ${image}`, error)
-					}
-				}),
-			)
+			const imagesDir = '/images'
+			if (await fse.pathExists(imagesDir)) {
+				const images = await fse.readdir(imagesDir)
+				const imagePaths = images.map((image) => `${imagesDir}/${image}`)
+				this.logger.log(`Pre-loading ${imagePaths.length} local images`)
+				await this.runtime.loadImages(imagePaths)
+			}
 		} catch (error) {
 			this.logger.error(`Failed to pre-load local Docker images`, error)
 		}
 
-		// Start app environment
+		// Start app environment via runtime
 		try {
 			try {
-				await appEnvironment(this.#umbreld, 'up')
+				await this.runtime.startEnvironment()
 			} catch (error) {
 				this.logger.error(`Failed to start app environment`, error)
-				this.logger.log('Attempting to clean Docker state before retrying...')
-				await this.cleanDockerState()
+				this.logger.log('Attempting to clean container state before retrying...')
+				await this.runtime.cleanState()
 			}
-			await pRetry(() => appEnvironment(this.#umbreld, 'up'), {
+			await pRetry(() => this.runtime.startEnvironment(), {
 				onFailedAttempt: (error) => {
 					this.logger.error(
-						`Attempt ${error.attemptNumber} starting app environmnet failed. There are ${error.retriesLeft} retries left.`,
+						`Attempt ${error.attemptNumber} starting app environment failed. There are ${error.retriesLeft} retries left.`,
 						error,
 					)
 				},
@@ -257,10 +254,10 @@ export default class Apps {
 		)
 
 		this.logger.log('Stopping app environment')
-		await pRetry(() => appEnvironment(this.#umbreld, 'down'), {
+		await pRetry(() => this.runtime.stopEnvironment(), {
 			onFailedAttempt: (error) => {
 				this.logger.error(
-					`Attempt ${error.attemptNumber} stopping app environmnet failed. There are ${error.retriesLeft} retries left.`,
+					`Attempt ${error.attemptNumber} stopping app environment failed. There are ${error.retriesLeft} retries left.`,
 				)
 			},
 			retries: 2,
@@ -307,18 +304,18 @@ export default class Apps {
 		// We use rsync to copy to preserve permissions
 		await $`rsync --archive --verbose --exclude ".gitkeep" ${appTemplatePath}/. ${appDataDirectory}`
 
-		// Save reference to app instance
-		const app = new App(this.#umbreld, appId)
+		// Save reference to app instance with runtime
+		const app = new App(this.#umbreld, appId, this.runtime)
 		const filledSelectedDependencies = fillSelectedDependencies(manifest.dependencies, alternatives)
 		await app.store.set('dependencies', filledSelectedDependencies)
 		this.instances.push(app)
 
-		// Complete the install process via the app script
+		// Complete the install process via the runtime
 		try {
 			// We quickly try to start the app env before installing the app. In most normal cases
 			// this just quickly returns and does nothing since the app env is already running.
 			// However in the case where the app env is down this ensures we start it again.
-			await appEnvironment(this.#umbreld, 'up')
+			await this.runtime.startEnvironment()
 			await app.install()
 		} catch (error) {
 			this.logger.error(`Failed to install app ${appId}`, error)

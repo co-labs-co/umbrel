@@ -33,6 +33,7 @@ const ShutdownDialog = React.lazy(() => import('@/routes/settings/shutdown'))
 const TroubleshootDialog = React.lazy(() => import('@/routes/settings/troubleshoot/index'))
 const TerminalDialog = React.lazy(() => import('@/routes/settings/terminal/index'))
 const DeviceInfoDialog = React.lazy(() => import('@/routes/settings/device-info'))
+const ClusterDialog = React.lazy(() => import('@/routes/settings/cluster/index'))
 const BackupsRestoreDialog = React.lazy(() => import('@/features/backups/index'))
 
 // drawers
@@ -131,6 +132,7 @@ export function Settings() {
 						{isMobile && <Route path='/language' Component={LanguageDrawer} />}
 						<Route path='/troubleshoot/*' Component={TroubleshootDialog} />
 						<Route path='/terminal/*' Component={TerminalDialog} />
+						<Route path='/cluster' Component={ClusterDialog} />
 						{isMobile && <Route path='/software-update' Component={SoftwareUpdateDrawer} />}
 						<Route path='/software-update/confirm' Component={SoftwareUpdateConfirmDialog} />
 						<Route path='/advanced/:advancedSelection?' Component={AdvancedSettingsDrawerOrDialog} />

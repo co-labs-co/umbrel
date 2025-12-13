@@ -17,6 +17,7 @@ import Notifications from './modules/notifications/notifications.js'
 import EventBus from './modules/event-bus/event-bus.js'
 import Dbus from './modules/dbus/dbus.js'
 import Backups from './modules/backups/backups.js'
+import {Cluster} from './modules/cluster/cluster.js'
 
 import {commitOsPartition, setupPiCpuGovernor, restoreWiFi, waitForSystemTime} from './modules/system/system.js'
 import {overrideDevelopmentHostname} from './modules/development.js'
@@ -42,6 +43,20 @@ type StoreSchema = {
 			password?: string
 		}
 		externalDns?: boolean
+		/**
+		 * Container runtime configuration
+		 * Default: docker-compose (current behavior)
+		 * kubernetes: Enables K3s-based deployment (Phase 2)
+		 */
+		containerRuntime?: {
+			type: 'docker-compose' | 'kubernetes'
+			/** Kubernetes-specific: path to kubeconfig file */
+			kubeconfig?: string
+			/** Kubernetes-specific: namespace for Umbrel apps (default: "umbrel") */
+			namespace?: string
+			/** Kubernetes-specific: storage class for PVCs (default: "local-path") */
+			storageClass?: string
+		}
 	}
 	development: {
 		hostname?: string
@@ -105,6 +120,7 @@ export default class Umbreld {
 	eventBus: EventBus
 	dbus: Dbus
 	backups: Backups
+	cluster: Cluster
 	isBackupRestoreFirstStart = false
 
 	constructor({
@@ -129,6 +145,7 @@ export default class Umbreld {
 		this.eventBus = new EventBus(this)
 		this.dbus = new Dbus(this)
 		this.backups = new Backups(this)
+		this.cluster = new Cluster(this)
 	}
 
 	async start() {
@@ -169,13 +186,17 @@ export default class Umbreld {
 		// the local time is set which then fail with SSL cert errors.
 		await waitForSystemTime(this, 10)
 
+		// Initialize container runtime from configuration
+		// Must be called before any runtime operations
+		await this.apps.initializeRuntime()
+
 		// We need to forcefully clean Docker state before being able to safely continue
 		// If an existing container is listening on port 80 we'll crash, if an old version
 		// of Umbrel wasn't shutdown properly, bringing containers up can fail.
 		// Skip this in dev mode otherwise we get very slow reloads since this cleans
 		// up app containers on every source code change.
 		if (!this.developmentMode) {
-			await this.apps.cleanDockerState().catch((error) => this.logger.error(`Failed to clean Docker state`, error))
+			await this.apps.runtime.cleanState().catch((error: Error) => this.logger.error(`Failed to clean Docker state`, error))
 		}
 
 		// Initialise modules
