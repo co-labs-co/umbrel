@@ -17,6 +17,7 @@ import Notifications from './modules/notifications/notifications.js'
 import EventBus from './modules/event-bus/event-bus.js'
 import Dbus from './modules/dbus/dbus.js'
 import Backups from './modules/backups/backups.js'
+import {Cluster} from './modules/cluster/cluster.js'
 
 import {commitOsPartition, setupPiCpuGovernor, restoreWiFi, waitForSystemTime} from './modules/system/system.js'
 import {overrideDevelopmentHostname} from './modules/development.js'
@@ -119,6 +120,7 @@ export default class Umbreld {
 	eventBus: EventBus
 	dbus: Dbus
 	backups: Backups
+	cluster: Cluster
 	isBackupRestoreFirstStart = false
 
 	constructor({
@@ -143,6 +145,7 @@ export default class Umbreld {
 		this.eventBus = new EventBus(this)
 		this.dbus = new Dbus(this)
 		this.backups = new Backups(this)
+		this.cluster = new Cluster(this)
 	}
 
 	async start() {

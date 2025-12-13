@@ -10,7 +10,7 @@ import {
 	RiShutDownLine,
 	RiUserLine,
 } from 'react-icons/ri'
-import {TbHistory, TbServer, TbSettings, TbSettingsMinus, TbTool, TbWifi} from 'react-icons/tb'
+import {TbHistory, TbNetwork, TbServer, TbSettings, TbSettingsMinus, TbTool, TbWifi} from 'react-icons/tb'
 import {useNavigate, useParams} from 'react-router-dom'
 
 import {ChevronDown} from '@/assets/chevron-down'
@@ -258,6 +258,11 @@ export function SettingsContent() {
 					<ListRow title={t('device-info')} description={t('device-info-description')}>
 						<IconButton icon={TbServer} onClick={() => navigate('device-info')}>
 							{t('device-info.view-info')}
+						</IconButton>
+					</ListRow>
+					<ListRow title={t('cluster')} description={t('cluster-description')}>
+						<IconButton icon={TbNetwork} onClick={() => navigate('cluster')}>
+							{t('cluster.manage')}
 						</IconButton>
 					</ListRow>
 					<ListRow title={t('advanced-settings')} description={t('advanced-settings-description')}>
