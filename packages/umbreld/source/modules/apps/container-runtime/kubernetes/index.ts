@@ -459,19 +459,25 @@ export class KubernetesRuntime implements ContainerRuntime {
 	async startEnvironment(): Promise<void> {
 		this.logger.log('Starting Kubernetes environment...')
 
-		// Create namespace if not exists
+		// Create namespace if it doesn't exist
+		// We use a simple create + ignore AlreadyExists approach
 		try {
-			await this.kubectl('create', 'namespace', this.namespace, '--dry-run=client', '-o', 'yaml')
-				.then(({stdout}) => this.kubectl('apply', '-f', '-', '--input', stdout))
-		} catch {
-			// Namespace might already exist, try direct apply
-			const namespaceYaml = yaml.dump({
-				apiVersion: 'v1',
-				kind: 'Namespace',
-				metadata: {name: this.namespace},
-			})
-			await $`echo ${namespaceYaml} | kubectl --kubeconfig ${this.kubeconfig} apply -f -`
+			await this.kubectl('create', 'namespace', this.namespace)
+			this.logger.log(`Created namespace: ${this.namespace}`)
+		} catch (error: unknown) {
+			// Check if it's an "already exists" error (expected)
+			const errorMessage = error instanceof Error ? error.message : String(error)
+			if (errorMessage.includes('already exists')) {
+				this.logger.verbose(`Namespace ${this.namespace} already exists`)
+			} else {
+				// Unexpected error - rethrow
+				throw error
+			}
 		}
+
+		// Verify namespace exists and is ready
+		await this.kubectl('get', 'namespace', this.namespace)
+		this.logger.verbose(`Verified namespace ${this.namespace} exists`)
 
 		// TODO: Deploy base services (tor-proxy, app-auth, app-proxy) as K8s resources
 		// For now, we just ensure the namespace exists
